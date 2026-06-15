@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CurbIQ — Illegal-Parking &amp; Congestion Intelligence</title>
+  <meta name="theme-color" content="#0b0e14" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <b><span class="logo">◖</span> CurbIQ</b>
+      <span>Illegal-Parking Hotspots &amp; Congestion Impact · Bengaluru Traffic Police</span>
+    </div>
+    <div class="kpis" id="kpis"></div>
+  </header>
+
+  <main>
+    <!-- LEFT: controls -->
+    <aside class="left">
+      <div class="section">
+        <h3>Map layer</h3>
+        <div class="control">
+          <label for="metric">Colour hexes by</label>
+          <select id="metric">
+            <option value="priority_score">Enforcement priority</option>
+            <option value="gi_z">Hotspot intensity (Gi* z)</option>
+            <option value="cis_score">Congestion impact (CIS)</option>
+            <option value="count">Violation count</option>
+            <option value="forecast_area">Forecast (next day)</option>
+            <option value="under_enforcement_gap">Under-enforcement gap</option>
+          </select>
+        </div>
+        <div class="legend">
+          <div class="bar"></div>
+          <div class="ends"><span id="legmin">low</span><span id="legmax">high</span></div>
+        </div>
+        <div class="control" style="margin-top:12px">
+          <label>Week: <span id="week-label">All-time</span>
+            <button id="week-play" class="minibtn" title="Animate weeks">▶</button>
+            <button id="week-all" class="minibtn" title="Show all-time">All</button>
+          </label>
+          <input type="range" id="week-slider" min="0" max="0" value="0" step="1" />
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>Overlays</h3>
+        <label class="toggle"><input type="checkbox" id="t-hex" checked> H3 hex layer</label>
+        <label class="toggle"><input type="checkbox" id="t-heat"> Density heat</label>
+        <label class="toggle"><input type="checkbox" id="t-junctions"> Junctions (top 60)</label>
+        <label class="toggle"><input type="checkbox" id="t-zones"> Hotspot zones</label>
+        <label class="toggle"><input type="checkbox" id="t-blind"> Under-enforcement blind spots</label>
+        <label class="toggle"><input type="checkbox" id="t-novel"> Novel hotspots (off-junction)</label>
+        <label class="toggle"><input type="checkbox" id="t-patrol"> Patrol routes (evening shift)</label>
+        <label class="toggle" id="t-3d-wrap" style="display:none"><input type="checkbox" id="t-3d"> 3D extruded hexes (deck.gl)</label>
+        <label class="toggle"><input type="checkbox" id="t-hotonly"> Significant hotspots only</label>
+      </div>
+
+      <div class="section">
+        <h3>Filters</h3>
+        <div class="control">
+          <label for="offence">Offence type</label>
+          <select id="offence"><option value="">All parking offences</option></select>
+        </div>
+        <div class="control">
+          <label for="minpri">Min priority score: <span id="minpri-v">0</span></label>
+          <input type="range" id="minpri" min="0" max="100" value="0" step="1" />
+        </div>
+      </div>
+
+      <div class="section">
+        <h3>About</h3>
+        <p style="font-size:11px;color:var(--muted);line-height:1.5">
+          Public layers are <b>H3 cell-aggregated</b> (DPDP-compliant); cells with
+          &lt;5 records are suppressed. Congestion impact is a
+          <span class="badge modeled">modeled</span> estimate (HCM&nbsp;→&nbsp;BPR),
+          not measured speed.
+        </p>
+        <div class="pill-row" id="meta-pills"></div>
+      </div>
+    </aside>
+
+    <!-- CENTER: map -->
+    <div style="position:relative">
+      <div id="map"></div>
+      <div class="loading" id="loading">Loading CurbIQ artifacts…</div>
+    </div>
+
+    <!-- RIGHT: analytics -->
+    <aside class="right">
+      <div class="tabs">
+        <button data-tab="overview" class="active">Overview</button>
+        <button data-tab="temporal">Timing</button>
+        <button data-tab="model">Model</button>
+        <button data-tab="equity">Equity</button>
+      </div>
+
+      <div class="tabpane active" id="tab-overview">
+        <div class="card">
+          <h4>Where the carriageway chokes</h4>
+          <p class="note">Top enforcement-priority locations, fusing statistical hotspot
+            intensity, modeled congestion impact and the next-day forecast.</p>
+          <table class="mini" id="tbl-priority"></table>
+        </div>
+        <div class="card">
+          <h4>Coverage vs. effort</h4>
+          <p class="note">Cumulative share of violations captured as you enforce more
+            locations, ranked by priority. The knee is the efficient deployment size.</p>
+          <canvas id="ch-coverage"></canvas>
+        </div>
+        <div class="card">
+          <h4>Top junctions</h4>
+          <table class="mini" id="tbl-junctions"></table>
+        </div>
+        <div class="card">
+          <h4>Validation vs BTP geography <span class="badge" id="geo-badge">junctions</span></h4>
+          <p class="note">How well statistical hotspots align with BTP's recognized junctions (precision within 300 m) — and novel off-junction hotspots = candidate new deployment points.</p>
+          <div class="metric-row" id="geo-stats"></div>
+        </div>
+        <div class="card">
+          <h4>Optimized patrol plan <span class="badge" id="patrol-badge">VRP</span></h4>
+          <p class="note">Evening-shift dispatch routes covering top-priority cells within each unit's time budget — the missing shift, made deployable. Toggle "Patrol routes" on the map.</p>
+          <div class="metric-row" id="patrol-stats"></div>
+        </div>
+      </div>
+
+      <div class="tabpane" id="tab-temporal">
+        <div class="card">
+          <h4>Enforcement vs. congestion risk by hour <span class="badge">IST</span></h4>
+          <p class="note">The blind spot: evening peak (5–9 PM) carries high congestion
+            risk yet sees almost no parking enforcement.</p>
+          <canvas id="ch-hourly"></canvas>
+        </div>
+        <div class="card">
+          <h4>Daily violations</h4>
+          <canvas id="ch-daily"></canvas>
+        </div>
+        <div class="card">
+          <h4>Vehicle mix &amp; top offences</h4>
+          <canvas id="ch-vehicle"></canvas>
+          <canvas id="ch-offence" style="margin-top:10px"></canvas>
+        </div>
+      </div>
+
+      <div class="tabpane" id="tab-model">
+        <div class="card">
+          <h4>Forecast model <span class="badge live">LightGBM Poisson</span></h4>
+          <p class="note">Walk-forward validated (expanding window, no leakage). PAI =
+            prediction accuracy index; ROC-AUC on the top-decile hotspot label.</p>
+          <div class="metric-row" id="model-stats"></div>
+        </div>
+        <div class="card">
+          <h4>Model vs. baselines (PAI@5%)</h4>
+          <canvas id="ch-baselines"></canvas>
+        </div>
+        <div class="card">
+          <h4>Feature importance</h4>
+          <canvas id="ch-features"></canvas>
+        </div>
+        <div class="card">
+          <h4>Congestion validation <span class="badge" id="calib-badge">probe ρ</span></h4>
+          <p class="note">CIS rank-validated against probe speeds (Spearman ρ); component weights re-fit to the feed. Synthetic probe shown — drop in TomTom/Google/Uber via <code>build_all.py --probe</code>.</p>
+          <div class="metric-row" id="calib-stats"></div>
+          <canvas id="ch-calib"></canvas>
+        </div>
+      </div>
+
+      <div class="tabpane" id="tab-equity">
+        <div class="card">
+          <h4>Hourly under-enforcement gap</h4>
+          <p class="note">Positive = under-enforced relative to congestion risk for that hour.</p>
+          <canvas id="ch-gap"></canvas>
+        </div>
+        <div class="card">
+          <h4>Spatial equity across stations</h4>
+          <p class="note">Enforcement coverage relative to modeled need. 4/5ths
+            disparate-impact rule applied.</p>
+          <div class="metric-row" id="equity-stats"></div>
+          <table class="mini" id="tbl-equity"></table>
+        </div>
+        <div class="card">
+          <h4>Emerging hotspots</h4>
+          <canvas id="ch-emerging"></canvas>
+        </div>
+      </div>
+      <div class="footer-note" id="footer"></div>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <script src="https://unpkg.com/h3-js@4.1.0/dist/h3-js.umd.js"></script>
+  <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.js"></script>
+  <script src="https://unpkg.com/deck.gl@9.0.38/dist.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

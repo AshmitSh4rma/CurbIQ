@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0b0e14"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#22d3ee" stroke-width="22"/>
+  <path d="M256 106 a150 150 0 0 0 0 300 Z" fill="#22d3ee"/>
+  <circle cx="256" cy="256" r="46" fill="#0b0e14"/>
+  <text x="256" y="452" font-family="system-ui,sans-serif" font-size="74" font-weight="800"
+        fill="#e6edf3" text-anchor="middle">CurbIQ</text>
+</svg>

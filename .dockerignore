@@ -1,0 +1,32 @@
+# Keep the build context (and image) lean — exclude everything regenerable,
+# heavy, or host-specific. data/ and models/ are supplied as volumes or built
+# at run time, never baked into the image.
+
+# Python runtime cruft
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Version control / editor
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# Generated data + models (mounted or built at run time)
+data/raw/*
+data/processed/*
+data/artifacts/*
+models/*.txt
+models/*.json
+
+# Docs / build files not needed inside the runtime image
+docs/
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore
