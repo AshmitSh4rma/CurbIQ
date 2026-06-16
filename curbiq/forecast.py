@@ -50,6 +50,19 @@ def build_panel(df: pd.DataFrame, res: int = C.FORECAST_RES) -> tuple[pd.DataFra
     panel = panel.merge(counts, on=["h3", "dt"], how="left")
     panel["count"] = panel["count"].fillna(0).astype(float)
 
+    # same-day peak-hour & heavy-vehicle event counts per cell. These are LAGGED
+    # in _grouped_shift_roll before entering the model (never used same-day -> no
+    # leakage); they realize the requested peak_hour_count / heavy_vehicle_count.
+    m0, m1 = C.MORNING_PEAK
+    e0, e1 = C.EVENING_PEAK
+    d["_is_peak"] = d["hour"].between(m0, m1 - 1) | d["hour"].between(e0, e1 - 1)
+    d["_is_heavy"] = d["vehicle_category"].isin(C.HEAVY_VEHICLE_CATEGORIES)
+    extra = (d.groupby([col, "dt"], observed=True)
+             .agg(peak_count=("_is_peak", "sum"), heavy_count=("_is_heavy", "sum"))
+             .reset_index().rename(columns={col: "h3"}))
+    panel = panel.merge(extra, on=["h3", "dt"], how="left")
+    panel[["peak_count", "heavy_count"]] = panel[["peak_count", "heavy_count"]].fillna(0.0)
+
     # static per-cell features
     static = d.groupby(col, observed=True).agg(
         lat=("latitude", "mean"), lon=("longitude", "mean"),
@@ -76,6 +89,12 @@ def _grouped_shift_roll(panel: pd.DataFrame) -> pd.DataFrame:
         panel[f"rstd{W}"] = gp.transform(lambda s: s.rolling(W, min_periods=2).std())
     panel["ewm"] = g.transform(
         lambda s: s.shift(1).ewm(halflife=C.FORECAST_EWM_HALFLIFE).mean())
+    # lagged peak-hour & heavy-vehicle load (shift(1) -> strictly past, no leakage)
+    for short, base in (("peak", "peak_count"), ("heavy", "heavy_count")):
+        gb = panel.groupby("h3", sort=False)[base]
+        panel[f"{short}_lag1"] = gb.shift(1)
+        panel[f"{short}_roll7"] = gb.transform(
+            lambda s: s.shift(1).rolling(7, min_periods=1).mean())
     panel = panel.drop(columns="_prev")
     return panel
 
@@ -186,6 +205,7 @@ def make_features(df: pd.DataFrame, res: int = C.FORECAST_RES, enrich="metro"):
         + [f"rmean{W}" for W in C.FORECAST_ROLLING]
         + [f"rstd{W}" for W in C.FORECAST_ROLLING]
         + ["ewm", "nbr_k1_lag1", "nbr_k1_roll7", "nbr_k2_lag1", "nbr_k2_roll7",
+           "peak_lag1", "peak_roll7", "heavy_lag1", "heavy_roll7",
            "lat", "lon", "road_loss", "is_junction_cell", "n_stations",
            "dow_sin", "dow_cos", "dom", "month_num", "is_weekend", "is_holiday"]
         + enrich_cols

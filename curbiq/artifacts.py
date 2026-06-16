@@ -26,7 +26,10 @@ from curbiq.forecast import run_forecast
 from curbiq.hotspots import (compute_hotspots, emerging_hotspots,
                              hotspot_zones, junction_hotspots)
 from curbiq.patrol import optimize_patrols
+from curbiq.emergence import run_emergence
 from curbiq.prioritize import run_prioritization
+from curbiq.scenario import run_scenario
+from curbiq.timing import run_timing
 from curbiq.validate_geo import run_geo_validation
 
 
@@ -136,6 +139,16 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
     log("time series + weekly evolution ...")
     ts = compute_timeseries(df)
     weekly = compute_weekly(df)
+    log("emergence risk (forward hotspot-formation model) ...")
+    emg = run_emergence(df)
+    log(f"  {emg['summary']['n_predicted_emerging']} cells predicted emerging; "
+        f"AUC {emg['summary']['model_auc']:.3f} vs baseline {emg['summary']['baseline_auc']:.3f}")
+    log("enforcement timing windows ...")
+    timing = run_timing(df, hot)
+    log("congestion ROI / what-if delay recovery ...")
+    scen = run_scenario(df, cis)
+    log(f"  recoverable-delay index {scen['summary']['city_recoverable_delay_index']:.1f}; "
+        f"{scen['summary']['cells_for_50pct']} cells recover 50%")
 
     # --- rich per-cell map layer (res 9), merged + k-anonymized ----------
     cells = prio["table"].set_index("h3")
@@ -145,6 +158,16 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
     cells = cells.join(cis.set_index("h3")[["capacity_loss", "z_density",
                                             "z_junction", "z_peak", "z_road"]],
                        how="left")
+    # forward-looking + ROI + timing layers (joined for map coloring of visible cells)
+    cells = cells.join(emg["cells"].set_index("h3")[
+        ["emergence_risk", "risk_band", "predicted_emerging"]], how="left")
+    cells = cells.join(scen["cells"].set_index("h3")[
+        ["recoverable_delay", "recoverable_pct"]], how="left")
+    cells = cells.join(timing["cells"].set_index("h3")[
+        ["peak_hour", "window_start", "window_end"]], how="left")
+    # don't double-label an established Gi* hotspot as "emerging" (distinct definitions)
+    cells["predicted_emerging"] = (cells["predicted_emerging"].fillna(False)
+                                   & ~cells["is_hotspot"].fillna(False))
     # cell -> zone id
     cell_zone = {}
     for _, row in zones.iterrows():
@@ -160,7 +183,10 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
                  "lisa_quadrant", "cis_score", "extra_delay_pct", "capacity_loss",
                  "priority_score", "priority_rank", "forecast_area",
                  "under_enforcement_gap", "is_blind_spot", "zone_id",
-                 "top_offence", "top_vehicle"]
+                 "top_offence", "top_vehicle",
+                 "emergence_risk", "risk_band", "predicted_emerging",
+                 "recoverable_delay", "recoverable_pct",
+                 "peak_hour", "window_start", "window_end"]
     cells_records = _round_records(cells_pub, [c for c in cell_cols if c in cells_pub], 3)
 
     # --- forecast layer (res 8), k-anon on predicted -> keep top area cells
@@ -194,6 +220,12 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
         "n_novel_hotspots": geo["n_novel_hotspots"],
         "patrol_coverage_pct": patrol["coverage_pct"],
         "patrol_solver": patrol["solver"],
+        "n_predicted_emerging": emg["summary"]["n_predicted_emerging"],
+        "emergence_model_auc": (round(emg["summary"]["model_auc"], 3)
+                                if emg["summary"]["model_auc"] == emg["summary"]["model_auc"]
+                                else None),
+        "cells_for_50pct_delay": scen["summary"]["cells_for_50pct"],
+        "enforcement_peak_hour_ist": timing["summary"]["peak_hour"],
     }
 
     # --- model metrics (rigor view) -------------------------------------
@@ -209,6 +241,10 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
         "hotspots": hot_stats,
         "congestion": cis_summary,
         "prioritization": prio["summary"],
+        "emergence": emg["summary"],
+        "scenario": scen["summary"],
+        "timing": {k: v for k, v in timing["summary"].items()
+                   if k not in ("global_hourly_ist", "weekday_hourly", "weekend_hourly")},
     }
 
     # --- assemble + write ------------------------------------------------
@@ -248,6 +284,30 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
     files.append(_write("timeseries.json", ts, outdir))
     files.append(_write("weekly.json", weekly, outdir))
     files.append(_write("model_metrics.json", model_metrics, outdir))
+    # k-anon: the standalone layers must honor the same count<K floor as cells.json
+    gi_hot = set(hot.index[hot["is_hotspot"]])
+    files.append(_write("emergence.json", {
+        "summary": emg["summary"],
+        "cells": _round_records(
+            emg["cells"][emg["cells"]["predicted_emerging"]
+                         & ~emg["cells"]["h3"].isin(gi_hot)].head(150),
+            ["h3", "lat", "lon", "emergence_risk", "risk_band"], 4),
+    }, outdir))
+    files.append(_write("timing.json", {
+        "summary": timing["summary"],
+        "cells": _round_records(
+            timing["cells"][timing["cells"]["n"] >= C.K_ANON_MIN].head(120), [
+            "h3", "lat", "lon", "n", "peak_hour", "window_start", "window_end",
+            "window_share", "morning_share", "evening_share"], 3),
+    }, outdir))
+    files.append(_write("scenario.json", {
+        "summary": scen["summary"],
+        "curve": scen["curve"],
+        "top": _round_records(
+            scen["cells"][scen["cells"]["count"] >= C.K_ANON_MIN].head(60), [
+            "h3", "lat", "lon", "recoverable_delay", "recoverable_pct", "cum_pct",
+            "rank", "extra_delay_pct", "count"], 4),
+    }, outdir))
 
     # --- trained model + manifest ---------------------------------------
     model_path = C.MODELS_DIR / "forecast_lgbm.txt"
@@ -278,6 +338,8 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
             "evening_peak_enforcement_share": kpis["evening_peak_enforcement_share"],
             "cis_validation_spearman": calib["spearman_calibrated"],
             "hotspot_btp_precision_300m": geo["precision_at_n"]["top154"]["300m"],
+            "emergence_model_auc": kpis["emergence_model_auc"],
+            "city_recoverable_delay_index": round(scen["summary"]["city_recoverable_delay_index"], 1),
         },
     }
     _write("manifest.json", manifest, outdir)

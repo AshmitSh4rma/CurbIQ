@@ -33,6 +33,8 @@
             <option value="count">Violation count</option>
             <option value="forecast_area">Forecast (next day)</option>
             <option value="under_enforcement_gap">Under-enforcement gap</option>
+            <option value="emergence_risk">Emergence risk (will become hotspot)</option>
+            <option value="recoverable_delay">Recoverable delay (clear-it ROI)</option>
           </select>
         </div>
         <div class="legend">
@@ -56,6 +58,7 @@
         <label class="toggle"><input type="checkbox" id="t-zones"> Hotspot zones</label>
         <label class="toggle"><input type="checkbox" id="t-blind"> Under-enforcement blind spots</label>
         <label class="toggle"><input type="checkbox" id="t-novel"> Novel hotspots (off-junction)</label>
+        <label class="toggle"><input type="checkbox" id="t-emergence"> Emergence watch-list (forecast)</label>
         <label class="toggle"><input type="checkbox" id="t-patrol"> Patrol routes (evening shift)</label>
         <label class="toggle" id="t-3d-wrap" style="display:none"><input type="checkbox" id="t-3d"> 3D extruded hexes (deck.gl)</label>
         <label class="toggle"><input type="checkbox" id="t-hotonly"> Significant hotspots only</label>
@@ -114,6 +117,14 @@
           <canvas id="ch-coverage"></canvas>
         </div>
         <div class="card">
+          <h4>Congestion ROI — recoverable delay <span class="badge modeled">modeled</span></h4>
+          <p class="note">Modeled traffic delay recoverable if each hotspot's illegal parking is
+            cleared (BPR Δ-delay × volume); reconciles with the city delay-impact index. Curve:
+            cumulative delay recovered as more cells are cleared, ranked by ROI.</p>
+          <div class="metric-row" id="roi-stats"></div>
+          <canvas id="ch-roi"></canvas>
+        </div>
+        <div class="card">
           <h4>Top junctions</h4>
           <table class="mini" id="tbl-junctions"></table>
         </div>
@@ -130,6 +141,16 @@
       </div>
 
       <div class="tabpane" id="tab-temporal">
+        <div class="card">
+          <h4>Recorded-activity windows <span class="badge">timing</span></h4>
+          <p class="note">Best 4-hour windows of <b>recorded</b> activity (weighted by modeled
+            peak congestion). Recorded times are patrol/recording-biased toward morning hours, so
+            these are <b>not</b> a deploy schedule — the actionable signal is the evening-peak
+            blind spot (high congestion risk vs ~0.2% recorded enforcement), shown below and on
+            the Equity tab.</p>
+          <div class="metric-row" id="timing-stats"></div>
+          <table class="mini" id="tbl-timing"></table>
+        </div>
         <div class="card">
           <h4>Enforcement vs. congestion risk by hour <span class="badge">IST</span></h4>
           <p class="note">The blind spot: evening peak (5–9 PM) carries high congestion
@@ -153,6 +174,12 @@
           <p class="note">Walk-forward validated (expanding window, no leakage). PAI =
             prediction accuracy index; ROC-AUC on the top-decile hotspot label.</p>
           <div class="metric-row" id="model-stats"></div>
+        </div>
+        <div class="card">
+          <h4>Emergence model <span class="badge live">LightGBM binary</span></h4>
+          <p class="note">Predicts which cells will <b>become</b> hotspots in the next 28 days
+            (forward-looking, temporal holdout). Reported honestly vs a persistence baseline.</p>
+          <div class="metric-row" id="emergence-stats"></div>
         </div>
         <div class="card">
           <h4>Model vs. baselines (PAI@5%)</h4>

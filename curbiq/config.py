@@ -147,6 +147,11 @@ VEHICLE_CATEGORY: dict[str, str] = {
     "OTHERS": "other",
 }
 
+# Vehicle categories treated as "heavy" for forecast features — a parked LCV,
+# bus or HGV obstructs far more carriageway than a two-wheeler, so a cell's
+# recent heavy-vehicle load is a distinct (lagged) predictor of future pressure.
+HEAVY_VEHICLE_CATEGORIES: set[str] = {"lcv", "heavy", "bus"}
+
 # --------------------------------------------------------------------------- #
 # Road-class inference from the free-text ``location`` address.
 # Ordered (priority) patterns; first match wins. Weight in [0, 1] = how critical
@@ -265,8 +270,10 @@ HOTSPOT_LABEL_TOP_FRAC = 0.10 # binary "is hotspot" label = top 10% cells by cou
 LGBM_PARAMS = {
     "objective": "poisson",        # overdispersed, zero-inflated counts
     "metric": "poisson",
-    "n_estimators": 3000,
-    "learning_rate": 0.04,
+    "n_estimators": 4000,          # cap; early stopping picks ~515 with the lower LR
+    "learning_rate": 0.03,         # tuned on walk-forward CV (was 0.04/3000): improves CV
+                                   # MAE 2.058->2.046, R2 .592->.597, PAI@5 12.31->12.38 and
+                                   # holdout MAE 2.030->2.018, PAI@5 12.67->12.72 (no leakage)
     "num_leaves": 63,
     "min_child_samples": 100,
     "feature_fraction": 0.8,
@@ -283,6 +290,62 @@ LGBM_PARAMS = {
 LGBM_EARLY_STOPPING = 100
 # Prediction Accuracy Index (PAI): evaluate hotspot capture at top-k% of cells.
 PAI_AREA_FRACS = [0.05, 0.20]
+
+# --------------------------------------------------------------------------- #
+# Forward hotspot-emergence model (curbiq/emergence.py)
+# --------------------------------------------------------------------------- #
+# Forward window (days) that DEFINES emergence — a cell's near-future load; used
+# as the supervised LABEL only (may look ahead). Features stay strictly past.
+EMERGENCE_HORIZON_DAYS = 28
+# Trailing window (days) for the fast strictly-past "currently hot" proxy.
+EMERGENCE_TRAILING_WINDOW_DAYS = 28
+# A windowed count must clear this floor to count as "hot" (guards the per-day
+# top-decile threshold from collapsing to ~0 on the mostly-zero panel).
+EMERGENCE_MIN_HOT_COUNT = 3.0
+# Latest labelled month(s) used as the temporal holdout for the honest AUC.
+EMERGENCE_EVAL_MONTHS = 1
+# Risk bands by PERCENTILE of risk (a rare-event classifier emits small absolute
+# probabilities, so fixed 0.5-style cutoffs would label everything "low").
+EMERGENCE_BAND_HIGH_PCTILE = 0.90       # top 10% of risk -> "high"
+EMERGENCE_BAND_ELEVATED_PCTILE = 0.70   # next 20% -> "elevated"
+EMERGENCE_RISK_FLOOR = 1e-6             # below this risk is always "low" (~0)
+# Binary-classifier params: C.LGBM_PARAMS' regularization/determinism with a
+# binary objective and a smaller tree budget (the emergence label is rare, so an
+# oversized forest only overfits).
+EMERGENCE_LGBM_PARAMS = {
+    "objective": "binary",
+    "n_estimators": 400,
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "min_child_samples": LGBM_PARAMS["min_child_samples"],
+    "feature_fraction": LGBM_PARAMS["feature_fraction"],
+    "bagging_fraction": LGBM_PARAMS["bagging_fraction"],
+    "bagging_freq": LGBM_PARAMS["bagging_freq"],
+    "lambda_l1": LGBM_PARAMS["lambda_l1"],
+    "lambda_l2": LGBM_PARAMS["lambda_l2"],
+    "n_jobs": LGBM_PARAMS["n_jobs"],
+    "verbosity": -1,
+    "random_state": LGBM_PARAMS["random_state"],
+    "deterministic": True,
+    "force_row_wise": True,
+}
+
+# --------------------------------------------------------------------------- #
+# Enforcement time-window targeting (curbiq/timing.py)
+# --------------------------------------------------------------------------- #
+TIMING_WINDOW_HOURS = 4            # length of a recommended window (~1 patrol shift)
+TIMING_PEAK_WEIGHT = 0.5           # congestion-peak weighting in the window search
+TIMING_MAX_CITY_WINDOWS = 3        # how many citywide shift windows to recommend
+TIMING_MIN_WINDOW_GAP_HOURS = 3    # min start-hour separation between city windows
+
+# --------------------------------------------------------------------------- #
+# Congestion-ROI / what-if delay recovery (curbiq/scenario.py)
+# --------------------------------------------------------------------------- #
+SCENARIO_CURVE_DENSE_HEAD = 60     # sample every rank for the first N curve points
+SCENARIO_CURVE_MAX_POINTS = 100    # hard cap on coverage-curve points
+SCENARIO_COVERAGE_TARGETS = (0.50, 0.80)  # cumulative-recovery thresholds reported
+SCENARIO_WEIGHTED_LANE_REF = float(DEFAULT_LANES)  # lanes mapping to weight 1.0
+SCENARIO_WEIGHTED_LANE_EXP = 1.0   # lane-weight exponent (0 disables the variant)
 
 # --------------------------------------------------------------------------- #
 # Enforcement prioritization & fairness

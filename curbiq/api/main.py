@@ -38,6 +38,9 @@ ARTIFACTS = {
     "timeseries": "timeseries.json",
     "weekly": "weekly.json",
     "model-metrics": "model_metrics.json",
+    "emergence": "emergence.json",
+    "timing": "timing.json",
+    "scenario": "scenario.json",
 }
 
 _CACHE: dict[str, tuple[bytes, str]] = {}

@@ -33,6 +33,9 @@ The single architectural commitment is **precompute-then-serve**: every expensiv
   │   hotspots.py  ─► Gi*/Moran/LISA + FDR (res 9)   [via spatial.py]      │
   │   congestion.py─► HCM capacity loss ─► BPR delay ─► composite CIS      │
   │   forecast.py  ─► LightGBM Poisson panel (res 8 × day), walk-forward   │
+  │   emergence.py ─► forward 28-day hotspot-emergence (binary, temporal)  │
+  │   timing.py    ─► per-hotspot 4h windows + citywide shift profiles     │
+  │   scenario.py  ─► recoverable modeled delay / congestion ROI           │
   │   prioritize.py─► exposure-adjusted rank + blind spots + coverage curve│
   │   hotspots.py  ─► zones / junctions / emerging (Mann-Kendall)          │
   │   fairness.py  ─► temporal/spatial equity + DPDP privacy (k-anon)      │
@@ -71,7 +74,10 @@ The single architectural commitment is **precompute-then-serve**: every expensiv
 | `spatial.py` | Pure numpy/scipy/h3 spatial-stats engine. | `build_active_lattice()`, `build_weights()`, `getis_ord_gi_star()`, `z_to_p_two_sided()`, `benjamini_hochberg()`, `global_morans_i()`, `local_morans()`, `mann_kendall()`, `gi_confidence_band()` |
 | `hotspots.py` | Cell/zone/junction/emerging hotspots. Analysis variable = **confidence-weighted** count. | `compute_hotspots()` (Gi*/Moran/LISA, res 9), `hotspot_zones()`, `junction_hotspots()`, `emerging_hotspots()`, `aggregate_cells()` |
 | `congestion.py` | Congestion Impact Score — **modeled, never measured**. maneuver intensity → HCM capacity loss → BPR delay multiplier → 4-factor z-scored composite (0–100). | `compute_congestion()`, `hcm_capacity_loss()`, `bpr_delay_ratio()`, `nearest_junction_distance()`, `haversine_m()` |
-| `forecast.py` | LightGBM Poisson spatiotemporal panel (res 8 × day, materialized zeros). Anti-leakage by construction. | `run_forecast()`, `make_features()`/`build_panel()`, `walk_forward()`, `baselines()`, `score_block()`, `pai_pei()` |
+| `forecast.py` | LightGBM Poisson spatiotemporal panel (res 8 × day, materialized zeros). Anti-leakage by construction. Now **36 features** incl. strictly-past peak-hour & heavy-vehicle lags. | `run_forecast()`, `make_features()`/`build_panel()`, `walk_forward()`, `baselines()`, `score_block()`, `pai_pei()` |
+| `emergence.py` | **Forward** hotspot-emergence risk: LightGBM **binary** classifier on the strictly-past forecast panel predicting which *not-currently-hot* cells turn hot within 28 days (label = trailing-28-day count below top-decile but forward-28-day count rises into top decile). **Temporal holdout, never random.** Emits per-cell `emergence_risk` / `risk_band` / `predicted_emerging`. | `run_emergence()` |
+| `timing.py` | Per-hotspot recommended **4-hour enforcement window** (maximizing captured violations weighted by modeled peak-congestion overlap) + citywide weekday/weekend hourly profiles and shift windows. Reports the **recording-biased** `created_datetime` profile faithfully (when enforcement was *recorded*, not when violations occur). | `run_timing()` |
+| `scenario.py` | Congestion **ROI / what-if**: per-cell recoverable modeled delay `(BPR delay-ratio − 1) × count`, reconciling exactly with congestion's `city_delay_impact_index`; ranks cells and emits a cumulative coverage-vs-recovered-delay curve. Modeled upper bound. | `run_scenario()` |
 | `prioritize.py` | Fuses Gi* z, CIS, forecast into an **exposure-adjusted** rank; surfaces under-enforcement blind spots and a coverage-vs-effort curve. | `run_prioritization()`, `exposure()` |
 | `fairness.py` | Makes patrol bias visible (temporal/spatial equity, 4/5ths disparate impact, statistical parity) + DPDP privacy helpers. | `run_fairness()`, `temporal_gap()`, `spatial_equity()`, `data_quality()`, `k_anon_suppress()`, `hash_plate()` |
 | `artifacts.py` | Runs everything once, merges per-cell layers, applies k-anonymity, writes versioned JSON + model + manifest. | `build_artifacts()`, `compute_timeseries()` |
@@ -81,17 +87,20 @@ The single architectural commitment is **precompute-then-serve**: every expensiv
 
 ## 3. The artifact JSON contract
 
-`build_artifacts()` writes 10 data files + `manifest.json` to `data/artifacts/`, plus the trained model to `models/`. All numbers are rounded (3 dp); numpy types are serialized via orjson `OPT_SERIALIZE_NUMPY`. **Public layers carry H3 cell ids + centroids only — never raw point lat/lon — and any cell with `count < 5` is suppressed.**
+`build_artifacts()` writes 13 data files + `manifest.json` to `data/artifacts/`, plus the trained model to `models/`. All numbers are rounded (3 dp); numpy types are serialized via orjson `OPT_SERIALIZE_NUMPY`. **Public layers carry H3 cell ids + centroids only — never raw point lat/lon — and any cell with `count < 5` is suppressed.**
 
 | File | API name | Shape |
 |---|---|---|
 | `manifest.json` | `manifest` | `{name, version ("YYYYMM_YYYYMM"), generated_at (UTC ISO), license, dataset:{records, date_range, source}, config:{h3_primary, forecast_res, gi_k, fdr_q, cis_weights, k_anon}, files:[{file, bytes}], headline_metrics:{global_moran_I, n_hotspots, forecast_pai_at_5, forecast_roc_auc, evening_peak_enforcement_share}}` |
-| `kpis.json` | `kpis` | flat dict: `total_violations, date_range, n_police_stations, n_junctions, n_h3_cells, n_hotspots, global_moran_I, global_moran_z, n_hotspot_zones, n_blind_spots, locations_for_50pct, city_delay_impact_index, evening_peak_enforcement_share, forecast_pai_at_5, forecast_roc_auc, top_station, top_offence` |
+| `kpis.json` | `kpis` | flat dict: `total_violations, date_range, n_police_stations, n_junctions, n_h3_cells, n_hotspots, global_moran_I, global_moran_z, n_hotspot_zones, n_blind_spots, locations_for_50pct, city_delay_impact_index, evening_peak_enforcement_share, forecast_pai_at_5, forecast_roc_auc, top_station, top_offence` + emergence/ROI/timing headline keys (`n_predicted_emerging` 238, `emergence_model_auc` 0.92, `cells_for_50pct_delay` 38, `enforcement_peak_hour_ist` 10, `city_recoverable_delay_index` 7513.3) |
 | `cells.json` | `cells` | `{resolution: 9, k_anon:{k,n_total,n_suppressed,frac_suppressed}, cells:[ {h3, lat, lon, count, gi_z, gi_band, is_hotspot, lisa_quadrant, cis_score, extra_delay_pct, capacity_loss, priority_score, priority_rank, forecast_area, under_enforcement_gap, is_blind_spot, zone_id, top_offence, top_vehicle} ]}` — the primary res-9 map layer |
 | `forecast_cells.json` | `forecast` | `{resolution: 8, cells:[ {h3, lat, lon, predicted_next_day} ]}` — res-8 next-day prediction, kept where `predicted_next_day ≥ 1.0` |
 | `zones.json` | `zones` | `list[ {zone_id ("Z000"…), n_cells, count, peak_gi_z, lat, lon, top_offence, top_vehicle, mean_peak_share} ]` — contiguous hotspot zones (top by count) |
 | `junctions.json` | `junctions` | `list[ {junction_id, count, lat, lon, mean_severity, peak_share, top_offence, rank, count_pctile} ]` — top 60 named junctions |
 | `emerging.json` | `emerging` | `{by_category:{category→count}, cells:[ {h3, lat, lon, category, trend, mk_z, mk_p, tau, total, active_week_frac} ]}` — Mann-Kendall trend typing (top 150) |
+| `emergence.json` | `emergence` | forward 28-day hotspot-emergence risk: scored cells with per-cell `emergence_risk` (0–1), `risk_band` (high/elevated/low, percentile-based), `predicted_emerging` (bool, disjoint from currently-hot) + summary (`n_scored` 2534, `n_currently_hot` 157, `n_predicted_emerging` 238, model AUC 0.920 vs 0.820 baseline) |
+| `timing.json` | `timing` | per-hotspot recommended 4-hour enforcement windows + citywide weekday/weekend hourly profiles and recommended shift windows (busiest recorded hour 10:00 IST; morning-peak share 0.286; evening-peak 17–21 recorded share 0.002) — recorded-time / patrol-bias caveat carried |
+| `scenario.json` | `scenario` | congestion ROI: per-cell recoverable modeled delay `(BPR ratio − 1) × count` (reconciles with `city_delay_impact_index` 7513.3) ranked, + cumulative coverage-vs-recovered-delay curve (`cells_for_50pct` 38, `cells_for_80pct` 206, top-cell ≈ 4.96%) — modeled upper bound |
 | `priority.json` | `priority` | `{summary:{…}, coverage_curve:{frac_locations[], frac_violations_captured[]}, top:[ {h3, lat, lon, priority_score, priority_rank, count, gi_z, cis_score, forecast_area, top_offence} ], blind_spots:[ {h3, lat, lon, under_enforcement_gap, propensity, count, cis_score} ]}` — blind spots filtered to `count ≥ 5` |
 | `fairness.json` | `fairness` | `{temporal:{hour[], enforcement_share[], risk_share[], under_enforcement_gap[], most_under_enforced_hours[], evening_peak_enforcement_share}, spatial_equity:{n_stations, disparate_impact_ratio, disparate_impact_flag, statistical_parity_diff, statistical_parity_flag, most_under_enforced[], most_over_enforced[]}, data_quality:{…}, privacy_policy:{…}}` |
 | `timeseries.json` | `timeseries` | descriptive breakdowns: `{daily, weekly, hourly_ist, day_of_week, vehicle_category, top_vehicle_types, top_offences, road_class, top_stations, time_of_day}` |
@@ -112,7 +121,7 @@ Endpoints:
 | Method · Path | Returns |
 |---|---|
 | `GET /health` | `{status, artifacts:[…names…]}` — liveness + which artifacts loaded |
-| `GET /api/{name}` | the named artifact bytes; `name` ∈ {`manifest, kpis, cells, forecast, zones, junctions, emerging, priority, fairness, timeseries, model-metrics`}. Unknown name → 404 with `available` list; not-yet-built → 503 |
+| `GET /api/{name}` | the named artifact bytes; `name` ∈ {`manifest, kpis, cells, forecast, zones, junctions, emerging, emergence, timing, scenario, priority, fairness, timeseries, model-metrics`}. Unknown name → 404 with `available` list; not-yet-built → 503 |
 | `GET /` (and static) | the `web/` dashboard (mounted last so `/api/*` and `/health` win) |
 
 **Caching:**

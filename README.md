@@ -32,12 +32,16 @@ All figures are produced by `build_all.py` from the real dataset and stored in `
 | **Hotspots** | **112** high-confidence hotspots (Getis-Ord Gi\* z ≥ 3.29) after Benjamini-Hochberg FDR (critical p = **0.00102**); **10** contiguous hotspot zones; top zone ≈ 60k violations in Central Bengaluru (Shivajinagar / Commercial St) |
 | **Top junction** | Safina Plaza — **15,413** violations, **69%** in peak hours |
 | **Congestion (MODELED)** | HCM capacity-loss → BPR delay multiplier → composite CIS (0–100); city delay-impact index ≈ **7,513**; max cell ≈ **7%** extra modeled delay |
-| **Forecast** | LightGBM Poisson, walk-forward (no leakage): holdout **ROC-AUC 0.92**, **R² 0.64**, **MAE 2.04**, **PAI@5% 12.7×**, PAI@20% 4.4×, PEI@5% 0.83 — beats last-week / rolling-7 / EWM baselines |
-| **Prioritization** | **109** rankable hotspot cells (of 112 Gi\*-significant; 3 are zero-violation neighbour-spillover), **402** detected under-enforcement blind spots (84 survive k-anonymity for display); **86** locations cover 50% of violations (530 → 80%); exposure-adjusted vs raw Spearman **0.98** (top hotspots are genuine, not patrol artifacts) |
+| **Congestion ROI (MODELED)** | Recoverable modeled delay per cell `(BPR ratio − 1) × count` reconciles exactly with the city delay-impact index **7,513**; **38** cells recover 50% (206 → 80%) of the city's modeled recoverable delay; top cell ≈ **5.0%** |
+| **Forecast** | LightGBM Poisson, walk-forward (no leakage), now **36 features** (was 32) incl. peak-hour & heavy-vehicle lags: holdout **ROC-AUC 0.925**, **R² 0.65** (was 0.64), **MAE 2.02**, **PAI@5% 12.7×**, PAI@20% 4.4×, PEI@5% 0.82 — beats last-week / rolling-7 / EWM baselines |
+| **Emergence (forward risk)** | LightGBM binary classifier predicting which cells *become* hotspots in the next **28 days** (temporal holdout): **AUC 0.92 vs 0.82** persistence/trend baseline (+0.10 lift); scores **2,534** cells → **157** currently hot, **238** predicted emerging |
+| **Prioritization** | **109** rankable hotspot cells (of 112 Gi\*-significant; 3 are zero-violation neighbour-spillover), **408** detected under-enforcement blind spots (83 survive k-anonymity for display); **84** locations cover 50% of violations (526 → 80%); exposure-adjusted vs raw Spearman **0.98** (top hotspots are genuine, not patrol artifacts) |
 | **Fairness** | Evening peak (17:00–21:00 IST, hours 17–20) enforcement share = **0.2%** (the headline blind spot); spatial disparate-impact ratio **0.42** (flagged < 0.8) |
 | **Privacy** | Public layers H3-only; cells with count < 5 suppressed (**33%** suppressed); plates SHA-256 + salted |
 
 > **Honest note on the forecast:** CurbIQ ties a strong EWM-persistence baseline on PAI. That is expected and stated openly — stable hotspots *are* persistent. The model's edge is in error metrics (MAE/RMSE), the hotspot AUC, and producing a calibrated next-day count surface rather than a naive carry-forward.
+
+> **Note on the dataset.** The public HackerEarth challenge CSV ("jan to may police violation, anonymized") was verified to be the *same* export CurbIQ already uses — 298,450 rows, identical Nov 2023 – Apr 2024 IST span and monthly distribution; the "jan to may" filename is mislabeled relative to the actual `created_datetime` values. No data migration was needed, and every result here is computed on this exact dataset.
 
 ---
 
@@ -63,6 +67,9 @@ CurbIQ does **all** heavy spatial/ML math once, offline, into versioned, privacy
                        │     hotspots.py  hotspots / zones / junctions / emerging│
                        │     congestion.py  HCM → BPR → CIS   (MODELED)          │
                        │     forecast.py  LightGBM Poisson panel, walk-forward   │
+                       │     emergence.py  forward 28-day hotspot-emergence risk │
+                       │     timing.py    per-hotspot 4h enforcement windows     │
+                       │     scenario.py  recoverable modeled delay / ROI        │
                        │     prioritize.py  exposure-adjusted rank + blind spots │
                        │     fairness.py  equity (4/5ths) + DPDP privacy         │
                        │                          │                              │
@@ -70,13 +77,15 @@ CurbIQ does **all** heavy spatial/ML math once, offline, into versioned, privacy
                        └──────────────────────────┼──────────────────────────────┘
                                                    ▼
                           data/artifacts/*.json (kpis, cells, forecast, zones,
-                          junctions, emerging, priority, fairness, timeseries,
-                          model_metrics) + manifest.json   |   models/forecast_lgbm.txt
+                          junctions, emerging, emergence, timing, scenario,
+                          priority, fairness, timeseries, model_metrics)
+                          + manifest.json   |   models/forecast_lgbm.txt
                                                    │
                                                    ▼
                     curbiq/api/main.py  —  FastAPI read-only artifact server
                     /health · /api/{manifest,kpis,cells,forecast,zones,junctions,
-                    emerging,priority,fairness,timeseries,model-metrics}
+                    emerging,emergence,timing,scenario,priority,fairness,
+                    timeseries,model-metrics}
                     (loads JSON into memory at startup; ETag + Cache-Control; no math)
                                                    │
                                                    ▼
@@ -114,8 +123,8 @@ There is **no speed or flow data** in the dataset, so CIS is an **explainable, m
 ### 3. Spatiotemporal forecasting — LightGBM Poisson panel  (`forecast.py`)
 
 - **Panel:** full cartesian (ever-active H3 res-8 cell × day) with the **absence signal materialized as explicit zeros** — without it PAI is meaningless. Target = next-day violation count; a binary top-10% hotspot label drives the ROC view.
-- **Features (all strictly past):** lags `[1,2,3,7,14,28]`, rolling mean/std windows `[3,7,14,28]` + EWM (halflife 7), all `shift(1)` / `closed='left'`; H3 k-ring(1)&(2) lagged neighbour sums; cyclical hour/dow; weekend + India/Karnataka holiday flags; static station / nearest junction / road-class / centroid lat-lon; **nearest-metro distance** (OSM/Overpass, 81 Namma Metro stations; daily weather optional via `enrich='all'`).
-- **Model:** `objective='poisson'` (overdispersed, zero-inflated counts), 3000 trees, lr 0.04, 63 leaves, L1/L2 regularization, early stopping.
+- **Features (all strictly past, 36 total):** lags `[1,2,3,7,14,28]`, rolling mean/std windows `[3,7,14,28]` + EWM (halflife 7); **lagged peak-hour & heavy-vehicle (LCV/bus/HGV) event counts** per cell; all `shift(1)` / `closed='left'`; H3 k-ring(1)&(2) lagged neighbour sums; cyclical hour/dow; weekend + India/Karnataka holiday flags; static station / nearest junction / road-class / centroid lat-lon; **nearest-metro distance** (OSM/Overpass, 81 Namma Metro stations; daily weather optional via `enrich='all'`).
+- **Model:** `objective='poisson'` (overdispersed, zero-inflated counts), 4000 trees, lr 0.03 (tuned on walk-forward CV), 63 leaves, L1/L2 regularization, early stopping.
 - **Validation:** expanding-window **walk-forward by month** (train ≥ 90 days → validate the next month). Leakage is prevented by strictly-lagged features (`shift(1)` / `closed='left'`), a 7-day train/validation split, and a **28-day early-stopping carve from the train tail** (`FORECAST_EMBARGO`) — so early stopping never sees the validation/holdout and gradient training ends ≥ 28 days before the scored period. Final April-2024 holdout is reported alongside the CV mean. **Never random K-fold** (future would leak into past).
 - **Metrics judges check:** **PAI@5% / PAI@20%** (rank cells by predicted density, measure hotspot capture vs area share) with **PEI** = PAI / oracle-PAI for honesty, plus ROC-AUC / PR-AUC, MAE, RMSE, R², mean Poisson deviance. Benchmarked against last-week, rolling-7 and EWM baselines.
 - *Citations:* LightGBM docs, Wheeler `ptools::pai` / White & Hunt 2023 (PAI/PEI), purged-and-embargoed walk-forward CV.
@@ -123,7 +132,7 @@ There is **no speed or flow data** in the dataset, so CIS is an **explainable, m
 ### 4. Enforcement prioritization — exposure-adjusted + blind spots  (`prioritize.py`)
 
 - **Default ranking is exposure-adjusted, not raw counts**, to break the patrol → record → rank → patrol feedback loop: `adjusted_rate = raw_count / (E_cell + α)` with Laplace `α = median(E_cell)` and exposure proxied by active recorded hours, distinct offence types, and temporal spread. Raw counts remain available only as a comparison toggle. The raw↔adjusted **Spearman 0.98** is published to prove the top hotspots are genuine, not patrol artifacts.
-- **Under-enforcement blind spots are a first-class output:** `gap = modeled_propensity_percentile − observed_count_percentile`; cells with **gap > 0.30** are flagged. Low recorded counts are *never* presented as "compliant." By construction blind spots have low observed counts, so most fall under the k-anonymity floor (count < 5): **402** are detected for analysis but **84** survive suppression for public per-cell display — the rest inform aggregate/zone-level guidance.
+- **Under-enforcement blind spots are a first-class output:** `gap = modeled_propensity_percentile − observed_count_percentile`; cells with **gap > 0.30** are flagged. Low recorded counts are *never* presented as "compliant." By construction blind spots have low observed counts, so most fall under the k-anonymity floor (count < 5): **408** are detected for analysis but **83** survive suppression for public per-cell display — the rest inform aggregate/zone-level guidance.
 - **Patrol allocation:** the ranked priority list plus a **coverage-vs-effort curve** (cumulative violations captured as more locations are enforced) — the knee is the efficient deployment size. Top-N output is sanity-checked against BTP's ~154 high-density enforcement points.
 
 ### 5. Fairness & privacy  (`fairness.py`)
@@ -137,11 +146,11 @@ There is **no speed or flow data** in the dataset, so CIS is an **explainable, m
 
 A build-free single-page app (`web/`) over Leaflet + h3-js + Chart.js. Open `http://localhost:8000`.
 
-- **Map — metric switcher (left panel):** recolour the H3 hex layer by **Enforcement priority**, **Hotspot intensity (Gi\* z)**, **Congestion impact (CIS)**, **Violation count**, **Forecast (next day)**, or **Under-enforcement gap**. A live legend tracks the active scale; clicking a hex opens a tooltip with violations, priority/rank, Gi\* z, CIS, modeled extra-delay %, next-day forecast, top offence, and a blind-spot warning.
-- **Overlays:** H3 hex layer · density heatmap · top-60 junctions (sized by count) · hotspot zones · under-enforcement blind spots · "significant hotspots only" filter. Plus offence-type and minimum-priority filters.
-- **Overview tab:** the priority table ("where the carriageway chokes"), the coverage-vs-effort curve, and the top-junctions table.
-- **Timing tab:** enforcement vs. modeled congestion-risk by hour (IST) — the evening-peak blind spot in one chart — daily-violation trend, vehicle mix and top-offence breakdowns.
-- **Model tab:** the forecast scorecard (PAI@5/20%, ROC-AUC, R², MAE, PEI@5%), a model-vs-baselines PAI bar, and feature importances.
+- **Map — metric switcher (left panel):** recolour the H3 hex layer by **Enforcement priority**, **Hotspot intensity (Gi\* z)**, **Congestion impact (CIS)**, **Violation count**, **Forecast (next day)**, **Under-enforcement gap**, **Emergence risk** (forward 28-day probability a cell turns into a hotspot), or **Recoverable delay** (modeled congestion-ROI per cell). A live legend tracks the active scale; clicking a hex opens a tooltip with violations, priority/rank, Gi\* z, CIS, modeled extra-delay %, next-day forecast, top offence, and a blind-spot warning.
+- **Overlays:** H3 hex layer · density heatmap · top-60 junctions (sized by count) · hotspot zones · under-enforcement blind spots · **emergence watch-list** (markers for the predicted-emerging cells = areas to watch, disjoint from currently-hot) · "significant hotspots only" filter. Plus offence-type and minimum-priority filters.
+- **Overview tab:** the priority table ("where the carriageway chokes"), the coverage-vs-effort curve, the top-junctions table, and the congestion-ROI coverage curve ("**38 cells recover 50% of modeled delay**") that ranks cells by recoverable modeled delay.
+- **Timing tab:** enforcement vs. modeled congestion-risk by hour (IST) — the evening-peak blind spot in one chart — plus the recommended per-hotspot 4-hour enforcement windows and citywide shift windows, carrying the **recording-bias note** (recorded times describe *when enforcement was logged*, heavily skewed to morning/early hours — busiest recorded hour 10:00 IST — not when violations occur; the genuine evening signal is the risk-vs-enforcement gap, not a literal "enforce at night" instruction). Also daily-violation trend, vehicle mix and top-offence breakdowns.
+- **Model tab:** the forecast scorecard (PAI@5/20%, ROC-AUC, R², MAE, PEI@5%) — now noting the forecast uses **36 features** incl. peak-hour & heavy-vehicle lags — a model-vs-baselines PAI bar, feature importances, and an **emergence scorecard** (AUC **0.92 vs 0.82** baseline, **238** predicted emerging).
 - **Equity tab:** the hourly under-enforcement gap, spatial-equity stats (disparate-impact ratio, parity diff, most under-enforced stations), and an emerging-hotspots breakdown.
 
 The footer always shows the artifact version, record count, % of cells k-anon suppressed, and the license.
@@ -156,7 +165,7 @@ Beyond the core hotspot → congestion → priority loop, CurbIQ ships five adva
 2. **Live camera ingestion** (`curbiq/cv/`) — **real ONNX vehicle detection** (SSD-MobileNet COCO *or* YOLOv8) via onnxruntime + IOU tracking + dwell-time + shapely no-parking-zone geofencing + pixel→GPS homography, emitting violations **in the dataset schema** so live detections feed the very same analytics. A 28 MB SSD-MobileNet model is fetched by `./run.sh --with-cv` (or `scripts/get_cv_model.sh`); point `CURBIQ_YOLO_ONNX` at any YOLOv8 `.onnx` instead. Falls back to a `SimulationDetector` only if no model/runtime is present. Demo (real inference on a street image): `python scripts/cv_demo.py`.
 3. **Geo-validation** (`curbiq/validate_geo.py`) — precision@N / recall of statistical hotspots vs BTP's recognized junctions (**72%** of top-50 within 300 m) and **39 novel off-junction hotspots** = candidate new deployment points. Plug in the official list with `--enforcement-points pts.csv`. → `/api/geo-validation`, map overlay.
 4. **Patrol routing** (`curbiq/patrol.py`) — a prize-collecting VRP (OR-Tools, with a greedy+2-opt fallback) turning the priority ranking into balanced evening-shift routes + ETAs (**6 units, 100% of top-60 covered, ~145 km**). → `/api/patrol`, map polylines.
-5. **Feature enrichment** (`curbiq/enrich.py`) — nearest-metro distance (OSM/Overpass, **81 Namma Metro stations**) lifts holdout **PAI@5 12.55 → 12.73** (`metro_dist_m` top-8, gain ≈1070); daily weather (Open-Meteo) is available (`enrich='all'`) but off by default since it hurt CV. Full 3-way A/B in the model card.
+5. **Feature enrichment** (`curbiq/enrich.py`) — nearest-metro distance (OSM/Overpass, **81 Namma Metro stations**). Nearest-metro distance is a clean enrichment win again under the tuned model: it lifts holdout **PAI@5 from 12.60 (34-feature) to 12.72 (36-feature)** and is a **top-8 feature by importance (1268)** (R² ~flat). Retained on by default; toggle via `enrich`. Daily weather (Open-Meteo) is available (`enrich='all'`) but off by default since it hurt CV. Full enrichment A/B in the model card.
 
 **Dashboard extras:** a **week-by-week time-slider** (animate hotspot evolution across 23 weeks) and an optional **deck.gl 3D extruded-hex** layer (feature-detected, degrades to 2D).
 
@@ -183,8 +192,8 @@ pip install -r requirements.txt
 #    data/raw/police_violations.csv.gz
 
 # 5. Build everything (ETL -> analytics -> versioned artifacts + model).
-#    Takes ~45s. The repo ships with artifacts already built, so this is
-#    only needed for a fresh dataset or to reproduce from scratch.
+#    Takes ~90s. Artifacts + model are git-ignored, so this step is required on
+#    a fresh clone (and to reproduce from scratch on new data).
 python build_all.py
 #    Force a full ETL re-run from the raw CSV:
 #    python build_all.py --rebuild-etl
@@ -223,6 +232,9 @@ CurbIQ/
 │   ├── hotspots.py           # hotspots / zones / junctions / emerging
 │   ├── congestion.py         # HCM -> BPR -> CIS (MODELED congestion impact)
 │   ├── forecast.py           # LightGBM Poisson panel, walk-forward CV, PAI/PEI, baselines
+│   ├── emergence.py          # forward 28-day hotspot-emergence risk (LightGBM binary, temporal holdout)
+│   ├── timing.py             # per-hotspot 4h enforcement windows + citywide shift profiles
+│   ├── scenario.py           # congestion ROI: recoverable modeled delay + coverage curve
 │   ├── prioritize.py         # exposure-adjusted ranking, blind spots, coverage curve
 │   ├── fairness.py           # temporal/spatial equity (4/5ths) + DPDP privacy helpers
 │   ├── calibration.py        # probe-speed validation + NNLS CIS-weight re-fit

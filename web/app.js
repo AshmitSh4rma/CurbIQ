@@ -27,7 +27,7 @@ Chart.defaults.font.family = "system-ui, sans-serif";
 const DATA = {};
 const ACCENT = "#22d3ee", ACCENT2 = "#a78bfa", HOT = "#ff3b30", WARN = "#ffb020", GOOD = "#34d399";
 const UNIT_COLORS = ["#22d3ee", "#a78bfa", "#34d399", "#ffb020", "#fb923c", "#ff3b30", "#60a5fa", "#f472b6"];
-let map, hexLayer, heatLayer, junctionLayer, zoneLayer, blindLayer, novelLayer, patrolLayer, weeklyLayer;
+let map, hexLayer, heatLayer, junctionLayer, zoneLayer, blindLayer, novelLayer, patrolLayer, weeklyLayer, emergenceLayer;
 let weekTimer = null, deckInstance = null;
 const charts = {};
 const builtTabs = new Set();
@@ -40,11 +40,11 @@ async function getJSON(name) {
 
 async function init() {
   try {
-    const [kpis, cells, priority, junctions, zones, forecast, fairness, calibration, geo, patrol, timeseries, weekly, model, emerging, manifest] =
+    const [kpis, cells, priority, junctions, zones, forecast, fairness, calibration, geo, patrol, timeseries, weekly, model, emerging, emergence, timing, scenario, manifest] =
       await Promise.all(["kpis", "cells", "priority", "junctions", "zones", "forecast",
-        "fairness", "calibration", "geo-validation", "patrol", "timeseries", "weekly", "model-metrics", "emerging", "manifest"].map(getJSON));
+        "fairness", "calibration", "geo-validation", "patrol", "timeseries", "weekly", "model-metrics", "emerging", "emergence", "timing", "scenario", "manifest"].map(getJSON));
     Object.assign(DATA, { kpis, cells: cells.cells, kanon: cells.k_anon, priority,
-      junctions, zones, forecast: forecast.cells, fairness, calibration, geo, patrol, timeseries, weekly, model, emerging, manifest });
+      junctions, zones, forecast: forecast.cells, fairness, calibration, geo, patrol, timeseries, weekly, model, emerging, emergence, timing, scenario, manifest });
   } catch (e) {
     $("loading").textContent = "Failed to load artifacts — run `python build_all.py`. " + e.message;
     return;
@@ -76,6 +76,7 @@ function renderKPIs() {
     ["Blind spots", fmt(k.n_blind_spots), true],
     ["Eve. enforce", (k.evening_peak_enforcement_share * 100).toFixed(1) + "%", true],
     ["Forecast PAI@5", fmt1(k.forecast_pai_at_5) + "×", false],
+    ["Emerging", fmt(k.n_predicted_emerging), true],
     ["Moran z", fmt1(k.global_moran_z), false],
   ];
   $("kpis").innerHTML = items.map(([l, v, a]) =>
@@ -102,6 +103,7 @@ function buildMap() {
   novelLayer = L.layerGroup();
   patrolLayer = L.layerGroup();
   weeklyLayer = L.layerGroup();
+  emergenceLayer = L.layerGroup();
 }
 
 function activeCells() {
@@ -149,7 +151,11 @@ function cellPopup(c) {
     + row("Congestion CIS", fmt1(c.cis_score))
     + row("Modeled extra delay", fmt1(c.extra_delay_pct) + "%")
     + row("Forecast (next day)", fmt1(c.forecast_area))
+    + (c.emergence_risk != null ? row("Emergence risk", fmt1(c.emergence_risk * 100) + "% " + (c.risk_band || "")) : "")
+    + (c.recoverable_delay != null ? row("Recoverable delay", fmt1(c.recoverable_delay)) : "")
+    + (c.window_start != null ? row("Suggested window", `${String(c.window_start).padStart(2, "0")}:00–${String(c.window_end).padStart(2, "0")}:00`) : "")
     + row("Top offence", c.top_offence || "–")
+    + (c.predicted_emerging ? `<div style="color:#22d3ee;margin-top:4px">▲ Predicted emerging hotspot</div>` : "")
     + (c.is_blind_spot ? `<div style="color:#ffb020;margin-top:4px">⚠ Under-enforcement blind spot</div>` : "")
     + `</div>`;
 }
@@ -216,6 +222,23 @@ function toggleNovel() {
   novelLayer.addTo(map);
 }
 
+function toggleEmergence() {
+  emergenceLayer.clearLayers();
+  if (!$("t-emergence").checked) { map.removeLayer(emergenceLayer); return; }
+  const cells = (DATA.emergence && DATA.emergence.cells) || [];
+  const horizon = (DATA.emergence.summary && DATA.emergence.summary.horizon_days) || 28;
+  const bandColor = { high: HOT, elevated: WARN, low: ACCENT };
+  for (const e of cells) {
+    const col = bandColor[e.risk_band] || ACCENT;
+    L.circleMarker([e.lat, e.lon], { radius: 6, color: col, weight: 2, fillColor: col, fillOpacity: 0.25 })
+      .bindPopup(`<b>Emergence watch</b> <span class="badge">${e.risk_band || ""}</span>`
+        + `<div class="popup-row"><span>Risk of becoming a hotspot</span><span>${fmt1(e.emergence_risk * 100)}%</span></div>`
+        + `<div class="popup-row"><span>Horizon</span><span>${horizon} days</span></div>`)
+      .addTo(emergenceLayer);
+  }
+  emergenceLayer.addTo(map);
+}
+
 function renderGeoStats() {
   const g = DATA.geo;
   $("geo-badge").textContent = g.is_official_list ? "official list" : `${g.n_reference_points} BTP junctions`;
@@ -271,10 +294,37 @@ function buildOverviewCharts() {
       scales: { x: { title: { display: true, text: "% of locations enforced" } },
         y: { title: { display: true, text: "% violations captured" }, max: 100 } } },
   });
+  const sc = DATA.scenario;
+  $("roi-stats").innerHTML = [
+    ["recoverable idx", fmt1(sc.summary.city_recoverable_delay_index)],
+    ["cells → 50%", sc.summary.cells_for_50pct],
+    ["cells → 80%", sc.summary.cells_for_80pct],
+    ["top cell", fmt1((sc.top[0] ? sc.top[0].recoverable_pct : 0) * 100) + "%"],
+  ].map(([l, v]) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+  charts.roi = new Chart($("ch-roi"), {
+    type: "line",
+    data: { labels: sc.curve.map((p) => (p.frac_cells * 100).toFixed(0) + "%"),
+      datasets: [{ label: "Delay recovered", data: sc.curve.map((p) => p.recovered_pct * 100),
+        borderColor: WARN, backgroundColor: "rgba(255,176,32,.15)", fill: true, pointRadius: 0, tension: .3 }] },
+    options: { plugins: { legend: { display: false } },
+      scales: { x: { title: { display: true, text: "% of cells cleared (by ROI)" }, ticks: { maxTicksLimit: 8 } },
+        y: { title: { display: true, text: "% modeled delay recovered" }, max: 100 } } },
+  });
 }
 
 function buildTemporalCharts() {
   const t = DATA.timeseries, f = DATA.fairness.temporal;
+  const tm = DATA.timing.summary;
+  $("timing-stats").innerHTML = [
+    ["busiest hour", String(tm.peak_hour).padStart(2, "0") + ":00"],
+    ["morning peak", (tm.morning_peak_share * 100).toFixed(0) + "%"],
+    ["evening peak", (tm.evening_peak_share * 100).toFixed(1) + "%"],
+    ["hotspot cells", tm.n_cells],
+  ].map(([l, v]) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+  $("tbl-timing").innerHTML = `<tr><th>Window (IST)</th><th class="num">Share</th></tr>`
+    + tm.recommended_windows.map((w) =>
+      `<tr><td>${String(w.start_hour).padStart(2, "0")}:00–${String(w.end_hour).padStart(2, "0")}:00 <span class="badge">${w.label}</span></td>`
+      + `<td class="num">${(w.share * 100).toFixed(0)}%</td></tr>`).join("");
   charts.hourly = new Chart($("ch-hourly"), {
     type: "bar",
     data: { labels: t.hourly_ist.hour,
@@ -310,6 +360,14 @@ function buildTemporalCharts() {
 
 function buildModelCharts() {
   const m = DATA.model.forecast, h = m.holdout.metrics;
+  const eg = DATA.emergence.summary;
+  const pctAuc = (x) => (x == null ? "n/a" : fmt1(x * 100) + "%");
+  $("emergence-stats").innerHTML = [
+    ["model AUC", pctAuc(eg.model_auc)],
+    ["baseline AUC", pctAuc(eg.baseline_auc)],
+    ["predicted emerging", eg.n_predicted_emerging],
+    ["horizon", eg.horizon_days + "d"],
+  ].map(([l, v]) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
   $("model-stats").innerHTML = [
     ["PAI@5%", fmt1(h["pai@5"]) + "×"], ["PAI@20%", fmt1(h["pai@20"]) + "×"],
     ["ROC-AUC", fmt1(h.roc_auc * 100) + "%"], ["R²", fmt1(h.r2)],
@@ -532,6 +590,7 @@ function wireControls() {
   $("t-zones").addEventListener("change", toggleZones);
   $("t-blind").addEventListener("change", toggleBlind);
   $("t-novel").addEventListener("change", toggleNovel);
+  $("t-emergence").addEventListener("change", toggleEmergence);
   $("t-patrol").addEventListener("change", togglePatrol);
   document.querySelectorAll(".tabs button").forEach((btn) => {
     btn.addEventListener("click", () => {

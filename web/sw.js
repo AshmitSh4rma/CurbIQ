@@ -1,5 +1,5 @@
 /* CurbIQ service worker — installable PWA + offline app-shell & artifact cache. */
-const CACHE = "curbiq-v1";
+const CACHE = "curbiq-v2";
 const SHELL = ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (e) => {
