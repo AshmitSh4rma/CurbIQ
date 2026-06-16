@@ -165,6 +165,13 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
         ["recoverable_delay", "recoverable_pct"]], how="left")
     cells = cells.join(timing["cells"].set_index("h3")[
         ["peak_hour", "window_start", "window_end"]], how="left")
+    # per-cell offences present (primary_offence with >= K_ANON_MIN records; privacy-safe) so the
+    # dashboard can filter cells CONTAINING an offence, not just the single dominant one.
+    _oc = (df[df["is_counted"]].dropna(subset=["primary_offence"])
+           .groupby(["h3_r9", "primary_offence"], observed=True).size())
+    _oc = _oc[_oc >= C.K_ANON_MIN].reset_index()
+    _cell_off = _oc.groupby("h3_r9", observed=True)["primary_offence"].apply(list).to_dict()
+    cells["offences"] = [_cell_off.get(h, []) for h in cells.index]
     # don't double-label an established Gi* hotspot as "emerging" (distinct definitions)
     cells["predicted_emerging"] = (cells["predicted_emerging"].fillna(False)
                                    & ~cells["is_hotspot"].fillna(False))
@@ -186,7 +193,7 @@ def build_artifacts(df: pd.DataFrame | None = None, outdir=C.ARTIFACTS_DIR,
                  "top_offence", "top_vehicle",
                  "emergence_risk", "risk_band", "predicted_emerging",
                  "recoverable_delay", "recoverable_pct",
-                 "peak_hour", "window_start", "window_end"]
+                 "peak_hour", "window_start", "window_end", "offences"]
     cells_records = _round_records(cells_pub, [c for c in cell_cols if c in cells_pub], 3)
 
     # --- forecast layer (res 8), k-anon on predicted -> keep top area cells

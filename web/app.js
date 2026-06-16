@@ -95,9 +95,11 @@ function renderMetaPills() {
 }
 
 function buildMap() {
-  map = L.map("map", { zoomControl: true, preferCanvas: true }).setView([12.9716, 77.5946], 12);
+  map = L.map("map", { zoomControl: false, preferCanvas: true, attributionControl: false })
+    .setView([12.9716, 77.5946], 12);
+  L.control.zoom({ position: "bottomright" }).addTo(map);
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-    attribution: "© OpenStreetMap, © CARTO", subdomains: "abcd", maxZoom: 19,
+    attribution: "", subdomains: "abcd", maxZoom: 19,
   }).addTo(map);
   hexLayer = L.layerGroup().addTo(map);
   junctionLayer = L.layerGroup();
@@ -116,14 +118,16 @@ function activeCells() {
   const hotonly = $("t-hotonly").checked;
   return DATA.cells.filter((c) =>
     c[metric] != null && c.priority_score >= minpri
-    && (!off || c.top_offence === off) && (!hotonly || c.is_hotspot));
+    && (!off || (c.offences && c.offences.includes(off))) && (!hotonly || c.is_hotspot));
 }
 
 function renderHexes() {
   hexLayer.clearLayers();
-  if (!$("t-hex").checked) return;
+  const empty = $("map-empty");
+  if (!$("t-hex").checked) { if (empty) empty.style.display = "none"; return; }
   const metric = $("metric").value;
   const cells = activeCells();
+  if (empty) empty.style.display = cells.length === 0 ? "block" : "none";
   const vals = cells.map((c) => +c[metric]);
   let lo = Math.min(...vals), hi = Math.max(...vals);
   if (metric === "gi_z") lo = Math.max(lo, -3);
@@ -255,11 +259,19 @@ function renderGeoStats() {
 
 function populateOffences() {
   const sel = $("offence");
-  // only offences that are actually a cell's dominant offence (else filter blanks map)
-  const present = [...new Set(DATA.cells.map((c) => c.top_offence).filter(Boolean))].sort();
-  present.forEach((o) => {
-    const opt = document.createElement("option"); opt.value = o; opt.textContent = o; sel.appendChild(opt);
-  });
+  // count how many cells CONTAIN each offence (not just have it as dominant), so the filter
+  // shows every cell where that offence occurs; hide offences present in fewer than 5 cells.
+  const counts = {};
+  for (const c of DATA.cells)
+    for (const o of (c.offences || (c.top_offence ? [c.top_offence] : [])))
+      counts[o] = (counts[o] || 0) + 1;
+  Object.entries(counts)
+    .filter(([, n]) => n >= 5)
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([o, n]) => {
+      const opt = document.createElement("option");
+      opt.value = o; opt.textContent = `${o} (${n})`; sel.appendChild(opt);
+    });
 }
 
 function renderPriorityTable() {
@@ -595,9 +607,9 @@ function wireControls() {
   $("t-novel").addEventListener("change", toggleNovel);
   $("t-emergence").addEventListener("change", toggleEmergence);
   $("t-patrol").addEventListener("change", togglePatrol);
-  document.querySelectorAll(".tabs button").forEach((btn) => {
+  document.querySelectorAll(".tabs button[data-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".tabs button[data-tab]").forEach((b) => b.classList.remove("active"));
       document.querySelectorAll(".tabpane").forEach((p) => p.classList.remove("active"));
       btn.classList.add("active");
       const tab = btn.dataset.tab;
@@ -605,6 +617,13 @@ function wireControls() {
       ensureTab(tab);
     });
   });
+  // panel collapse / reveal for a clean fullscreen map (re-fit Leaflet after the transition)
+  const mainEl = document.querySelector("main");
+  const reflow = () => setTimeout(() => { if (map) map.invalidateSize(); }, 320);
+  $("hide-left").onclick = () => { mainEl.classList.add("left-collapsed"); reflow(); };
+  $("show-left").onclick = () => { mainEl.classList.remove("left-collapsed"); reflow(); };
+  $("hide-right").onclick = () => { mainEl.classList.add("right-collapsed"); reflow(); };
+  $("show-right").onclick = () => { mainEl.classList.remove("right-collapsed"); reflow(); };
 }
 
 init();
