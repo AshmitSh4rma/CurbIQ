@@ -32,8 +32,11 @@ let weekTimer = null, deckInstance = null;
 const charts = {};
 const builtTabs = new Set();
 
+// Static-deploy mode (GitHub Pages / file://): read artifacts as relative JSON files
+// instead of the FastAPI /api/* routes, so the same dashboard works with or without a backend.
+const STATIC = location.protocol === "file:" || /\.github\.io$/.test(location.hostname);
 async function getJSON(name) {
-  const r = await fetch(`/api/${name}`);
+  const r = await fetch(STATIC ? `api/${name}.json` : `/api/${name}`);
   if (!r.ok) throw new Error(`${name}: ${r.status}`);
   return r.json();
 }
@@ -607,6 +610,6 @@ function wireControls() {
 init();
 
 // installable PWA + offline shell
-if ("serviceWorker" in navigator) {
+if (!STATIC && "serviceWorker" in navigator) {   // skip SW in static mode (root-absolute shell paths 404 under project-pages subpath)
   window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 }
