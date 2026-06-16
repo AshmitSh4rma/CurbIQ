@@ -21,7 +21,8 @@
 
   <main>
     <!-- LEFT: controls -->
-    <aside class="left">
+    <aside class="left" id="panel-left">
+      <button class="hide-left" id="hide-left" title="Hide panel">‹</button>
       <div class="section">
         <h3>Map layer</h3>
         <div class="control">
@@ -78,20 +79,22 @@
 
       <div class="section">
         <h3>About</h3>
-        <p style="font-size:11px;color:var(--muted);line-height:1.5">
+        <p class="about-note">
           Public layers are <b>H3 cell-aggregated</b> (DPDP-compliant); cells with
           &lt;5 records are suppressed. Congestion impact is a
           <span class="badge modeled">modeled</span> estimate (HCM&nbsp;→&nbsp;BPR),
           not measured speed.
         </p>
         <div class="pill-row" id="meta-pills"></div>
+        <div class="credit">Basemap © OpenStreetMap contributors, © CARTO.</div>
       </div>
     </aside>
 
     <!-- CENTER: map -->
-    <div style="position:relative">
+    <div id="map-wrap">
       <div id="map"></div>
       <div class="loading" id="loading">Loading CurbIQ artifacts…</div>
+      <div class="map-empty" id="map-empty" style="display:none">No cells match these filters.</div>
     </div>
 
     <!-- RIGHT: analytics -->
@@ -101,6 +104,7 @@
         <button data-tab="temporal">Timing</button>
         <button data-tab="model">Model</button>
         <button data-tab="equity">Equity</button>
+        <button class="panel-collapse" id="hide-right" title="Hide panel">›</button>
       </div>
 
       <div class="tabpane active" id="tab-overview">
@@ -217,6 +221,9 @@
       </div>
       <div class="footer-note" id="footer"></div>
     </aside>
+
+    <button class="reveal reveal-left" id="show-left" title="Show controls">controls&nbsp;›</button>
+    <button class="reveal reveal-right" id="show-right" title="Show insights">‹&nbsp;insights</button>
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
