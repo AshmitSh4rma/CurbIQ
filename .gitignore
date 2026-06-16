@@ -35,3 +35,7 @@ models/*.json
 !data/processed/.gitkeep
 !data/artifacts/.gitkeep
 !models/.gitkeep
+
+# Publish the privacy-safe (H3-aggregated, k-anonymized, centroid-only) JSON artifacts
+# so a fresh clone serves the dashboard demo with no raw dataset and no rebuild.
+!data/artifacts/*.json
