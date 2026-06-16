@@ -62,7 +62,7 @@ uvicorn curbiq.api.main:app --port 8000
 ## Field checklist
 - **Repository URL** — **https://github.com/AshmitSh4rma/CurbIQ**
 - **Source Code** — `git archive --format=zip -o curbiq.zip HEAD` (or zip the repo excluding `.venv/` and `data/raw/`).
-- **Demo Link** — `localhost:8000` won't be reachable by reviewers; either deploy the static dashboard + a built `data/artifacts/` to any host, or rely on the video + run-it-yourself instructions above. (Ask me to help deploy.)
+- **Demo Link** — **https://ashmitsh4rma.github.io/CurbIQ/** — live GitHub Pages build of the dashboard on the privacy-safe artifacts (no backend needed; full map + all four analytics tabs).
 - **Video URL** — 2–3 min screen-record: map metric switcher (priority/hotspot/CIS/forecast/emergence/recoverable-delay) → click a hotspot → the 4 analytics tabs → the evening-peak blind-spot chart.
-- **Presentation** — ask me to draft a slide outline.
+- **Presentation** — slide-by-slide outline in **`PITCH.md`** (12 slides); build it into a deck (Keynote/PPT/Slides) and upload.
 - **Snapshots** — screenshot the map (hotspot + emergence overlays) and the Model + Equity tabs.
